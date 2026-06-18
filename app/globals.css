@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-sans: 'Pretendard', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: #0b1410;
+  color: #f5f7f5;
+  overflow: hidden;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+@layer components {
+  .hud-panel {
+    @apply rounded-2xl border border-white/10 bg-black/55 shadow-hud backdrop-blur-md;
+  }
+
+  .hud-label {
+    @apply text-[11px] font-medium uppercase tracking-wider text-white/50;
+  }
+
+  .action-btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-action px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-action-hover disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .icon-rail-btn {
+    @apply flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-black/50 text-white/80 backdrop-blur-md transition-colors hover:bg-white/15;
+  }
+}
+
+/* thin scrollbars inside HUD panels */
+.thin-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+}
