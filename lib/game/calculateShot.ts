@@ -9,7 +9,9 @@ const MAX_SHOT_DISTANCE = 160;
 export interface ShotInput {
   teamId: string;
   prompt: string;
-  generatedImageUrl: string | null;
+  targetN: number;
+  generatedHtml: string | null;
+  screenshotUrl: string | null;
   similarity: number;
   hole: Hole;
   /** Current ball position before the swing. */
@@ -73,7 +75,9 @@ export function calculateShot(input: ShotInput): ShotResult {
     shot: {
       teamId: input.teamId,
       prompt: input.prompt,
-      generatedImageUrl: input.generatedImageUrl,
+      targetN: input.targetN,
+      generatedHtml: input.generatedHtml,
+      screenshotUrl: input.screenshotUrl,
       similarity,
       distanceMoved,
       angleOffset: Math.round(angleOffset * 10) / 10,

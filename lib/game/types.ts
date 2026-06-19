@@ -6,6 +6,16 @@ export interface CoursePosition {
   z: number;
 }
 
+/** A target screen the player must recreate on a given stroke. */
+export interface Target {
+  /** Stroke number this target belongs to (1-based). */
+  n: number;
+  /** Filename under /public/targets, e.g. "image_1.png". */
+  file: string;
+  /** Public URL, e.g. "/targets/image_1.png". */
+  url: string;
+}
+
 export interface Team {
   id: string;
   name: string;
@@ -19,7 +29,7 @@ export interface Team {
   /** Total distance (m) the ball has progressed from the tee toward the hole. */
   totalDistance: number;
   isCurrentTurn: boolean;
-  /** Marks the hole as completed (ball sunk). */
+  /** Marks the hole as completed. */
   finished?: boolean;
 }
 
@@ -28,9 +38,6 @@ export interface Hole {
   par: number;
   /** Total tee-to-hole distance in meters. */
   distance: number;
-  targetImageUrl: string;
-  /** Short description of the scene the player must recreate. */
-  targetDescription: string;
   flagPosition: CoursePosition;
   teePosition: CoursePosition;
   windSpeed: number;
@@ -41,7 +48,12 @@ export interface Hole {
 export interface Shot {
   teamId: string;
   prompt: string;
-  generatedImageUrl: string | null;
+  /** Stroke number / target index this shot was played against. */
+  targetN: number;
+  /** HTML the model generated for the prompt. */
+  generatedHtml: string | null;
+  /** Captured screenshot of the rendered HTML (data URL). */
+  screenshotUrl: string | null;
   similarity: number;
   distanceMoved: number;
   angleOffset: number;

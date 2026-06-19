@@ -27,7 +27,7 @@ export default function DashboardPage() {
   const teams = useGameStore((s) => s.teams);
   const myTeamId = useGameStore((s) => s.myTeamId);
   const leaderboard = useGameStore((s) => s.leaderboard());
-  const hole = useGameStore((s) => s.currentHole());
+  const hole = useGameStore((s) => s.hole);
   const myTeam = useGameStore((s) => s.myTeam());
 
   const [draftName, setDraftName] = useState('버디헌터스');

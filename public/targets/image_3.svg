@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="640" viewBox="0 0 1024 640">
+  <defs>
+    <linearGradient id="bg3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fde68a"/><stop offset="1" stop-color="#fb7185"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="640" fill="url(#bg3)"/>
+  <!-- centered profile card -->
+  <rect x="312" y="120" width="400" height="400" rx="28" fill="#ffffff"/>
+  <circle cx="512" cy="210" r="56" fill="#fb7185"/>
+  <circle cx="512" cy="210" r="56" fill="#ffffff" opacity="0.15"/>
+  <rect x="432" y="290" width="160" height="22" rx="11" fill="#1f2937"/>
+  <rect x="452" y="324" width="120" height="14" rx="7" fill="#9ca3af"/>
+  <rect x="360" y="372" width="304" height="2" fill="#e5e7eb"/>
+  <g fill="#374151">
+    <rect x="360" y="392" width="60" height="22" rx="6"/>
+    <rect x="360" y="430" width="60" height="22" rx="6"/>
+  </g>
+  <g fill="#9ca3af">
+    <rect x="500" y="392" width="164" height="22" rx="6"/>
+    <rect x="500" y="430" width="120" height="22" rx="6"/>
+  </g>
+  <rect x="360" y="472" width="304" height="44" rx="22" fill="#fb7185"/>
+  <text x="512" y="610" font-family="sans-serif" font-size="11" fill="#7f1d1d" text-anchor="middle">샘플 목표 #3 — 그라데이션 배경 위 중앙 프로필 카드 (image_3)</text>
+</svg>
