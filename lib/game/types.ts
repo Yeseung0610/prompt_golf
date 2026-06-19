@@ -59,3 +59,46 @@ export interface Shot {
   angleOffset: number;
   isMissSwing: boolean;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Physics & Hazard System Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Type of hazard on the course */
+export type HazardType = 'water' | 'bunker' | 'ob' | 'tree';
+
+/** Where the ball landed */
+export type LandingZone = 'fairway' | 'rough' | 'bunker' | 'green' | 'water' | 'ob' | 'beach';
+
+/** A hazard zone definition */
+export interface HazardZone {
+  id: string;
+  type: HazardType;
+  position: [number, number, number];
+  size: [number, number, number];
+  /** Penalty strokes (0 for bunker, 1 for water/OB) */
+  penalty: number;
+  /** Whether to reset ball to last safe position */
+  resetToLastPosition: boolean;
+}
+
+/** Hill definition for terrain */
+export interface HillDefinition {
+  position: [number, number, number];
+  radius: number;
+  height: number;
+}
+
+/** Event fired when ball enters a hazard */
+export interface PenaltyEvent {
+  type: HazardType;
+  strokes: number;
+  resetPosition: CoursePosition;
+  message: string;
+}
+
+/** Complete course layout data */
+export interface CourseLayout {
+  hazards: HazardZone[];
+  hills: HillDefinition[];
+}

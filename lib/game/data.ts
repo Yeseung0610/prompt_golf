@@ -21,30 +21,15 @@ export function defaultAvatar(seed: string): string {
 export const HOLE: Hole = {
   id: 1,
   par: 4,
-  distance: 320,
+  distance: 395,  // 열대 해변 코스: 395m
   teePosition: { x: 0, z: 0 },
-  flagPosition: { x: 0, z: 320 },
-  windSpeed: 2.3,
-  windDirection: 45,
+  flagPosition: { x: -15, z: 380 },  // S-커브 끝 그린 위치
+  windSpeed: 3.5,  // 해변 바람
+  windDirection: 270,  // 서풍 (바다에서 불어옴)
   difficulty: '보통',
 };
 
-/** Seed teams that appear on the dashboard leaderboard / field. */
+/** Mock 데이터 제거됨 - 서버에서 실제 플레이어 데이터 사용 */
 export function createSeedTeams(): Team[] {
-  const seeds: Array<{ id: string; name: string; score: number; dist: number; x: number }> = [
-    { id: 'slice', name: '슬라이스 마스터즈', score: -8, dist: 210, x: -14 },
-    { id: 'long', name: '롱샷킹즈', score: -6, dist: 145, x: 8 },
-    { id: 'eagle', name: '이글이글', score: -5, dist: 95, x: -6 },
-    { id: 'putt', name: '퍼팅의신', score: -3, dist: 30, x: 4 },
-  ];
-  return seeds.map((s) => ({
-    id: s.id,
-    name: s.name,
-    imageUrl: defaultAvatar(s.name),
-    score: s.score,
-    currentStroke: Math.max(1, Math.round(s.dist / 90)),
-    ballPosition: { x: s.x, z: s.dist },
-    totalDistance: s.dist,
-    isCurrentTurn: false,
-  }));
+  return [];
 }

@@ -2,7 +2,7 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import type { Hole, Shot, Target, Team } from '@/lib/game/types';
+import type { Hole, Shot, Target, Team, PenaltyEvent, CoursePosition } from '@/lib/game/types';
 import { HOLE, createSeedTeams, defaultAvatar } from '@/lib/game/data';
 import { calculateShot } from '@/lib/game/calculateShot';
 
@@ -27,6 +27,10 @@ interface GameState {
   lastShot: Shot | null;
   /** Bumped whenever the active team's ball moves, so the 3D scene can react. */
   shotTick: number;
+  /** Last penalty event for UI display */
+  lastPenalty: PenaltyEvent | null;
+  /** Last safe position before hazard */
+  lastSafePosition: CoursePosition;
 
   // selectors
   myTeam: () => Team | undefined;
@@ -40,14 +44,18 @@ interface GameState {
   loadTargets: () => Promise<void>;
   setProfile: (name: string, imageUrl: string | null) => void;
   applyShot: (args: ApplyShotArgs) => Shot;
+  applyPenalty: (penalty: PenaltyEvent) => void;
+  clearPenalty: () => void;
+  updateLastSafePosition: (position: CoursePosition) => void;
   resetGame: () => void;
 }
 
-function makeMyTeam(name = '버디헌터스', imageUrl: string | null = null): Team {
+function makeMyTeam(name = '', imageUrl: string | null = null): Team {
+  const displayName = name.trim() || '플레이어';
   return {
     id: MY_TEAM_ID,
-    name,
-    imageUrl: imageUrl ?? defaultAvatar(name),
+    name: displayName,
+    imageUrl: imageUrl ?? defaultAvatar(displayName),
     score: 0,
     currentStroke: 0,
     ballPosition: { x: 0, z: 0 },
@@ -68,6 +76,8 @@ export const useGameStore = create<GameState>()(
       profileReady: false,
       lastShot: null,
       shotTick: 0,
+      lastPenalty: null,
+      lastSafePosition: { x: 0, z: 0 },
 
       myTeam: () => get().teams.find((t) => t.id === get().myTeamId),
       activeTeam: () => get().teams.find((t) => t.isCurrentTurn) ?? get().myTeam(),
@@ -79,8 +89,7 @@ export const useGameStore = create<GameState>()(
       },
 
       ensureSeeded: () => {
-        if (get().teams.length > 0) return;
-        set({ teams: [makeMyTeam(), ...createSeedTeams()] });
+        // Mock 데이터 없음 - 서버에서 실제 플레이어 데이터 사용
       },
 
       loadTargets: async () => {
@@ -95,7 +104,7 @@ export const useGameStore = create<GameState>()(
 
       setProfile: (name, imageUrl) =>
         set((state) => {
-          const trimmed = name.trim() || '버디헌터스';
+          const trimmed = name.trim() || '플레이어';
           const exists = state.teams.some((t) => t.id === state.myTeamId);
           const teams = exists
             ? state.teams.map((t) =>
@@ -153,13 +162,35 @@ export const useGameStore = create<GameState>()(
         return result.shot;
       },
 
+      applyPenalty: (penalty: PenaltyEvent) =>
+        set((s) => ({
+          teams: s.teams.map((t) =>
+            t.id === s.myTeamId
+              ? {
+                  ...t,
+                  ballPosition: penalty.resetPosition,
+                  currentStroke: t.currentStroke + penalty.strokes,
+                }
+              : t
+          ),
+          lastPenalty: penalty,
+          shotTick: s.shotTick + 1,
+        })),
+
+      clearPenalty: () => set({ lastPenalty: null }),
+
+      updateLastSafePosition: (position: CoursePosition) =>
+        set({ lastSafePosition: position }),
+
       resetGame: () => {
         const me = get().myTeam();
         set({
-          teams: [me ? makeMyTeam(me.name, me.imageUrl) : makeMyTeam(), ...createSeedTeams()],
+          teams: me ? [makeMyTeam(me.name, me.imageUrl)] : [],
           shots: [],
           lastShot: null,
           shotTick: 0,
+          lastPenalty: null,
+          lastSafePosition: { x: 0, z: 0 },
         });
       },
     }),

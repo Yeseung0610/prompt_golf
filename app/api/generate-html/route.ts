@@ -23,10 +23,10 @@ export async function POST(req: NextRequest) {
 
   try {
     const { html, provider } = await generateHtml(prompt);
-    return NextResponse.json({ html, provider });
+    return NextResponse.json({ success: true, html, provider });
   } catch (err) {
     return NextResponse.json(
-      { error: 'HTML generation failed', detail: String(err) },
+      { success: false, error: 'HTML generation failed', detail: String(err) },
       { status: 500 },
     );
   }
