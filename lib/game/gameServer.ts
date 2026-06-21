@@ -23,6 +23,21 @@ export interface Player {
   finished: boolean;
   lastSeen: number; // 마지막 활동 시간 (폴링 기반 연결 감지)
   isHost: boolean;
+  currentPrompt: string; // 현재 작성 중인 프롬프트 (관전자 실시간 표시용)
+}
+
+/**
+ * 샷 1건의 이벤트. 폴링으로 신규 샷만 받아 1회 비행 애니메이션을 재생하기 위한 데이터.
+ * dist는 티에서 진행한 누적 거리(마커 배치와 동일 기준), x는 측면 오프셋.
+ */
+export interface ShotEvent {
+  id: number;
+  playerId: string;
+  fromX: number;
+  fromDist: number;
+  toX: number;
+  toDist: number;
+  finished: boolean;
 }
 
 export interface GameRoom {
@@ -33,6 +48,8 @@ export interface GameRoom {
   currentHole: number;
   createdAt: number;
   lastActivity: number;
+  shotSeq: number; // 샷마다 증가하는 ID 시퀀스 (리셋되지 않음)
+  shotLog: ShotEvent[]; // 최근 샷 이벤트 (오래된 것은 잘라냄)
 }
 
 export interface PlayerDTO {
@@ -47,6 +64,7 @@ export interface PlayerDTO {
   finished: boolean;
   isHost: boolean;
   online: boolean;
+  currentPrompt: string;
 }
 
 export interface GameStateDTO {
@@ -56,6 +74,10 @@ export interface GameStateDTO {
   players: PlayerDTO[];
   currentHole: number;
   myPlayerId: string | null;
+  /** 요청한 sinceShotId 이후의 신규 샷들 (없으면 빈 배열). */
+  shots: ShotEvent[];
+  /** 현재까지 발생한 샷의 최대 ID (클라이언트 포인터 갱신용). */
+  latestShotId: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -64,7 +86,10 @@ export interface GameStateDTO {
 
 // 메인 방 (항상 존재)
 const MAIN_ROOM_ID = 'main-room';
-let mainRoom: GameRoom | null = null;
+
+// 방 상태를 globalThis에 보관 → Next.js dev의 모듈 재평가(Fast Refresh/온디맨드 컴파일)
+// 때 모듈 변수가 리셋되어 접속자 전체가 사라졌다 재생성되는 문제를 방지한다.
+const globalForGame = globalThis as unknown as { __promptGolfRoom?: GameRoom | null };
 
 // 플레이어 온라인 판정 시간 (5초 이내 폴링하면 온라인)
 const ONLINE_THRESHOLD_MS = 5000;
@@ -76,13 +101,10 @@ const INACTIVE_THRESHOLD_MS = 10 * 60 * 1000;
 // Helper Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-function generateId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 9)}`;
-}
 
 function getOrCreateMainRoom(): GameRoom {
-  if (!mainRoom) {
-    mainRoom = {
+  if (!globalForGame.__promptGolfRoom) {
+    globalForGame.__promptGolfRoom = {
       id: MAIN_ROOM_ID,
       name: 'Prompt Golf',
       players: new Map(),
@@ -90,9 +112,11 @@ function getOrCreateMainRoom(): GameRoom {
       currentHole: 1,
       createdAt: Date.now(),
       lastActivity: Date.now(),
+      shotSeq: 0,
+      shotLog: [],
     };
   }
-  return mainRoom;
+  return globalForGame.__promptGolfRoom;
 }
 
 function playerToDTO(player: Player): PlayerDTO {
@@ -109,6 +133,7 @@ function playerToDTO(player: Player): PlayerDTO {
     finished: player.finished,
     isHost: player.isHost,
     online: now - player.lastSeen < ONLINE_THRESHOLD_MS,
+    currentPrompt: player.currentPrompt,
   };
 }
 
@@ -160,10 +185,11 @@ export function joinGame(
     player.lastSeen = Date.now();
     console.log(`[GameServer] Player reconnected: ${name} (${sessionId.slice(0, 8)}...)`);
   } else {
-    // 새 플레이어
+    // 새 플레이어. id는 sessionId 기반으로 고정 → 서버가 플레이어를 잃고
+    // 재생성해도 동일 id가 유지되어 관전 타겟/내 플레이어 식별이 깨지지 않는다.
     const isHost = room.players.size === 0;
     player = {
-      id: generateId(),
+      id: `p-${sessionId}`,
       sessionId,
       name,
       avatarUrl,
@@ -174,6 +200,7 @@ export function joinGame(
       finished: false,
       lastSeen: Date.now(),
       isHost,
+      currentPrompt: '',
     };
     room.players.set(sessionId, player);
     console.log(`[GameServer] New player joined: ${name} (${room.players.size} total)`);
@@ -189,7 +216,11 @@ export function joinGame(
  * @param sessionId 플레이어 세션 ID
  * @param adminMode true면 플레이어 lastSeen 업데이트 안 함 (관찰자 모드)
  */
-export function getGameState(sessionId: string, adminMode = false): GameStateDTO | null {
+export function getGameState(
+  sessionId: string,
+  adminMode = false,
+  sinceShotId: number | null = null
+): GameStateDTO | null {
   const room = getOrCreateMainRoom();
   cleanupInactivePlayers(room);
 
@@ -201,6 +232,10 @@ export function getGameState(sessionId: string, adminMode = false): GameStateDTO
 
   const players = Array.from(room.players.values()).map(playerToDTO);
 
+  // sinceShotId가 주어지면 그 이후의 샷만, 없으면(첫 동기화) 백로그 없이 빈 배열
+  const shots =
+    sinceShotId == null ? [] : room.shotLog.filter((s) => s.id > sinceShotId);
+
   return {
     roomId: room.id,
     roomName: room.name,
@@ -208,7 +243,21 @@ export function getGameState(sessionId: string, adminMode = false): GameStateDTO
     players,
     currentHole: room.currentHole,
     myPlayerId: player?.id ?? null,
+    shots,
+    latestShotId: room.shotSeq,
   };
+}
+
+/**
+ * 단일 플레이어 조회 (관전 화면 전용 폴링). 작성 중 프롬프트 등 라이브 데이터 반환.
+ */
+export function getPlayer(playerId: string): PlayerDTO | null {
+  const room = getOrCreateMainRoom();
+  const entries = Array.from(room.players.values());
+  for (const p of entries) {
+    if (p.id === playerId) return playerToDTO(p);
+  }
+  return null;
 }
 
 /**
@@ -246,9 +295,11 @@ export function startGame(
     p.totalDistance = 0;
     p.score = 0;
     p.finished = false;
+    p.currentPrompt = '';
   }
 
   room.status = 'playing';
+  room.shotLog = []; // 이전 게임의 샷 이벤트 제거 (shotSeq는 단조 증가 유지)
   room.lastActivity = Date.now();
 
   console.log(`[GameServer] Game started by ${adminMode ? 'Admin' : player?.name}`);
@@ -297,6 +348,10 @@ export function submitShot(
   // 측면 편차 (유사도가 낮을수록 큼)
   const lateralDeviation = (1 - similarity) * 30 * (Math.random() > 0.5 ? 1 : -1);
 
+  // 비행 시작점 (업데이트 전 위치 — 샷 이벤트 기록용)
+  const fromX = player.ballPosition.x;
+  const fromDist = player.totalDistance;
+
   // 새 위치 계산
   const FLAG_Z = 380;
   const oldZ = player.ballPosition.z;
@@ -314,12 +369,28 @@ export function submitShot(
   player.ballPosition = { x: newX, z: newZ };
   player.totalDistance += shotDistance;
   player.finished = finished;
+  player.currentPrompt = ''; // 샷을 치면 작성 중 프롬프트 초기화
   player.lastSeen = Date.now();
 
   if (finished) {
     // 파 4 기준 스코어 계산
     player.score = player.currentStroke - 4;
     console.log(`[GameServer] ${player.name} finished hole in ${player.currentStroke} strokes`);
+  }
+
+  // 샷 이벤트 기록 (고유 ID 부여, 도착지 포함). 신규 샷만 1회 애니메이션하기 위함.
+  room.shotSeq += 1;
+  room.shotLog.push({
+    id: room.shotSeq,
+    playerId: player.id,
+    fromX,
+    fromDist,
+    toX: newX,
+    toDist: player.totalDistance,
+    finished,
+  });
+  if (room.shotLog.length > 200) {
+    room.shotLog.splice(0, room.shotLog.length - 200);
   }
 
   room.lastActivity = Date.now();
@@ -338,6 +409,26 @@ export function submitShot(
     newTotalDistance: player.totalDistance,
     finished: player.finished,
   };
+}
+
+/**
+ * 작성 중인 프롬프트 갱신 (관전자 실시간 표시용, 가벼운 호출)
+ */
+export function updateDraftPrompt(
+  sessionId: string,
+  prompt: string
+): { success: true } | { success: false; error: string } {
+  const room = getOrCreateMainRoom();
+  const player = room.players.get(sessionId);
+
+  if (!player) {
+    return { success: false, error: '플레이어를 찾을 수 없습니다.' };
+  }
+
+  player.currentPrompt = (prompt ?? '').slice(0, 2000);
+  player.lastSeen = Date.now();
+
+  return { success: true };
 }
 
 /**
@@ -362,18 +453,31 @@ export function resetGame(
     }
   }
 
-  // 모든 플레이어 초기화
-  const players = Array.from(room.players.values());
-  for (const p of players) {
+  // 연결이 끊긴(최근 폴링 없는) 플레이어는 리더보드에서 제거 → 유령 플레이어 정리
+  const now = Date.now();
+  const STALE_MS = ONLINE_THRESHOLD_MS * 2; // 10초 이상 폴링 없으면 제거
+  for (const [sid, p] of Array.from(room.players.entries())) {
+    if (now - p.lastSeen > STALE_MS) room.players.delete(sid);
+  }
+  // 호스트가 제거됐으면 남은 첫 플레이어를 호스트로
+  const remaining = Array.from(room.players.values());
+  if (remaining.length > 0 && !remaining.some((p) => p.isHost)) {
+    remaining[0].isHost = true;
+  }
+
+  // 남은 플레이어 초기화
+  for (const p of remaining) {
     p.currentStroke = 0;
     p.ballPosition = { x: 0, z: 0 };
     p.totalDistance = 0;
     p.score = 0;
     p.finished = false;
+    p.currentPrompt = '';
   }
 
   // 리셋 후 바로 playing 상태로 시작 (별도 시작 버튼 불필요)
   room.status = 'playing';
+  room.shotLog = []; // 이전 게임의 샷 이벤트 제거 (shotSeq는 단조 증가 유지)
   room.lastActivity = Date.now();
 
   console.log(`[GameServer] Game reset and auto-started by ${adminMode ? 'Admin' : player?.name}`);

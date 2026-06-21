@@ -14,7 +14,6 @@ import { HoleMiniMap } from '@/components/game/HoleMiniMap';
 import { PromptSwingPanel } from '@/components/game/PromptSwingPanel';
 import { CompareOverlay } from '@/components/game/CompareOverlay';
 import { PenaltyOverlay } from '@/components/game/PenaltyOverlay';
-import { captureHtml } from '@/lib/capture/captureHtml';
 import { HOLE_1_LAYOUT } from '@/lib/game/courseLayout';
 import type { Shot, PenaltyEvent, HazardType, Team } from '@/lib/game/types';
 
@@ -96,6 +95,7 @@ export default function PlayPage() {
   const [feedback, setFeedback] = useState<ShotFeedback | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [showRoomCode, setShowRoomCode] = useState(false);
+  const [panelExpanded, setPanelExpanded] = useState(false);
 
   const prevBallPosition = useRef({ x: 0, z: 0, totalDistance: 0 });
   const hasInitialized = useRef(false);
@@ -255,6 +255,7 @@ export default function PlayPage() {
   // ─────────────────────────────────────────────────────────────────────────
   const handleSwing = async (prompt: string) => {
     if (!currentTarget) return;
+    setPanelExpanded(false);
     setPhase('generating');
     setFeedback(null);
     setCompareData(null);
@@ -266,26 +267,18 @@ export default function PlayPage() {
     };
 
     let similarity = 0.5;
-    let html: string | null = null;
     let screenshotUrl: string | null = null;
 
     try {
-      setStatusText('웹페이지 생성 중…');
+      setStatusText('이미지 생성 중…');
       try {
-        const res = await fetch('/api/generate-html', {
+        const res = await fetch('/api/generate-image', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ prompt }),
         });
-        if (res.ok) html = (await res.json()).html ?? null;
+        if (res.ok) screenshotUrl = (await res.json()).dataUrl ?? null;
       } catch { /* continue */ }
-
-      if (html) {
-        setStatusText('화면 캡처 중…');
-        try {
-          screenshotUrl = await captureHtml(html);
-        } catch { /* continue */ }
-      }
 
       if (screenshotUrl) {
         setStatusText('유사도 비교 중…');
@@ -293,7 +286,7 @@ export default function PlayPage() {
           const res = await fetch('/api/compare', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ screenshot: screenshotUrl, targetFile: currentTarget.file }),
+            body: JSON.stringify({ generatedUrl: screenshotUrl, targetFile: currentTarget.file }),
           });
           if (res.ok) similarity = (await res.json()).similarity ?? similarity;
         } catch { /* continue */ }
@@ -306,12 +299,13 @@ export default function PlayPage() {
           similarity,
           prompt,
           targetN: currentTarget.n,
-          generatedHtml: html,
+          // 생성 이미지는 소켓 페이로드 과대화 방지를 위해 서버 제출엔 싣지 않는다.
+          generatedHtml: null,
         });
         setPhase('comparing');
         setStatusText('');
       } else {
-        handleApplyShot(similarity, prompt, currentTarget.n, html, null);
+        handleApplyShot(similarity, prompt, currentTarget.n, null, null);
       }
     } catch {
       setPhase('idle');
@@ -321,14 +315,13 @@ export default function PlayPage() {
 
   const handleCompareComplete = () => {
     if (!compareData) return;
+    // compareData를 즉시 비워 재진입(중복 호출) 시 같은 샷이 두 번
+    // 제출되는 것을 막는다. (한 스윙에 2타가 나가던 버그 방어)
+    const data = compareData;
+    setCompareData(null);
     setPhase('flying');
-    handleApplyShot(
-      compareData.similarity,
-      compareData.prompt,
-      compareData.targetN,
-      compareData.generatedHtml,
-      compareData.generatedUrl,
-    );
+    // 생성 이미지(대용량 base64)는 소켓 페이로드 과대화 방지를 위해 제출하지 않는다.
+    handleApplyShot(data.similarity, data.prompt, data.targetN, null, null);
   };
 
   const handleApplyShot = async (
@@ -541,12 +534,18 @@ export default function PlayPage() {
         )}
       </AnimatePresence>
 
-      {/* Bottom: prompt + swing panel */}
-      <div className="absolute bottom-5 left-1/2 w-full max-w-4xl -translate-x-1/2 px-5">
+      {/* Bottom: prompt + swing panel (크게 보기 시 폭도 함께 확장) */}
+      <div
+        className={`absolute bottom-5 left-1/2 w-full -translate-x-1/2 px-5 transition-[max-width] duration-300 ${
+          panelExpanded ? 'max-w-[1500px]' : 'max-w-4xl'
+        }`}
+      >
         <PromptSwingPanel
           target={currentTarget}
           swinging={isSwinging}
           statusText={statusText}
+          expanded={panelExpanded}
+          onExpandedChange={setPanelExpanded}
           onSwing={handleSwing}
         />
       </div>

@@ -1,33 +1,19 @@
 import { NextResponse } from 'next/server';
-import { promises as fs } from 'fs';
-import path from 'path';
+import { listTargetFiles, toTargetItems } from '@/lib/game/targetsStore';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const TARGET_DIR = path.join(process.cwd(), 'public', 'targets');
-const EXT = /^image_(\d+)\.(png|jpe?g|webp|gif|svg)$/i;
-
 /**
  * GET /api/targets
- * Lists target images placed in /public/targets named image_{n}.(png|jpg|…),
- * sorted by n. Each n corresponds to a stroke (타수); the hole stays the same.
+ * 타겟 이미지 목록을 manifest 순서대로 반환. 각 항목의 n은 타수(1부터)에 대응.
  */
 export async function GET() {
   try {
-    const files = await fs.readdir(TARGET_DIR);
-    const targets = files
-      .map((file) => {
-        const m = file.match(EXT);
-        if (!m) return null;
-        return { n: Number(m[1]), file, url: `/targets/${file}` };
-      })
-      .filter((t): t is { n: number; file: string; url: string } => t !== null)
-      .sort((a, b) => a.n - b.n);
-
-    return NextResponse.json({ targets });
+    const files = await listTargetFiles();
+    return NextResponse.json({ targets: toTargetItems(files) });
   } catch {
-    // Folder missing or unreadable → empty list (game shows a placeholder).
+    // 폴더 없거나 읽기 실패 → 빈 목록 (게임은 플레이스홀더 표시)
     return NextResponse.json({ targets: [] });
   }
 }

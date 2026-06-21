@@ -1,23 +1,23 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Target } from '@/lib/game/types';
+import { ImageZoomDialog } from './ImageZoomDialog';
 
-const MAX_LEN = 300;
+const MAX_LEN = 2000;
+// 작성 중 프롬프트 임시 저장 키 (리마운트/새로고침에도 입력이 날아가지 않도록)
+const DRAFT_KEY = 'prompt_golf_draft';
 
-// 로딩 단계 정의
+// 로딩 단계 정의 (이미지 생성 → 유사도 비교)
 const LOADING_STEPS = [
-  { key: 'generating', label: '웹페이지 생성 중', icon: '🎨' },
-  { key: 'capturing', label: '화면 캡처 중', icon: '📸' },
+  { key: 'generating', label: '이미지 생성 중', icon: '🎨' },
   { key: 'comparing', label: '유사도 비교 중', icon: '🔍' },
 ];
 
 function getStepIndex(statusText?: string): number {
   if (!statusText) return 0;
-  if (statusText.includes('생성')) return 0;
-  if (statusText.includes('캡처')) return 1;
-  if (statusText.includes('비교')) return 2;
+  if (statusText.includes('비교')) return 1;
   return 0;
 }
 
@@ -26,6 +26,11 @@ interface PromptSwingPanelProps {
   swinging: boolean;
   /** Short status line shown while swinging (생성 중 / 캡처 중 / 비교 중). */
   statusText?: string;
+  /** 확대 보기 여부 (부모가 패널 너비도 함께 키운다). */
+  expanded: boolean;
+  onExpandedChange: (v: boolean) => void;
+  /** 입력 변경 시 호출 (관전자 실시간 동기화용). */
+  onPromptChange?: (prompt: string) => void;
   onSwing: (prompt: string) => void;
 }
 
@@ -34,27 +39,86 @@ export function PromptSwingPanel({
   target,
   swinging,
   statusText,
+  expanded,
+  onExpandedChange,
+  onPromptChange,
   onSwing,
 }: PromptSwingPanelProps) {
   const [prompt, setPrompt] = useState('');
+  const [zoomSrc, setZoomSrc] = useState<string | null>(null);
+
+  // 마운트 시 저장된 draft 복원 (재참가/리마운트/새로고침에도 입력 보존)
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(DRAFT_KEY);
+      if (saved) {
+        setPrompt(saved);
+        onPromptChange?.(saved);
+      }
+    } catch {
+      /* ignore */
+    }
+    // 마운트 시 1회만 복원
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const updatePrompt = (value: string) => {
+    const v = value.slice(0, MAX_LEN);
+    setPrompt(v);
+    try {
+      sessionStorage.setItem(DRAFT_KEY, v);
+    } catch {
+      /* ignore */
+    }
+    onPromptChange?.(v);
+  };
 
   const handleSwing = () => {
     const trimmed = prompt.trim();
     if (!trimmed || swinging || !target) return;
+    // 스윙 시작 시 draft 비움 (다음 샷은 새로 입력)
+    try {
+      sessionStorage.removeItem(DRAFT_KEY);
+    } catch {
+      /* ignore */
+    }
+    setPrompt('');
     onSwing(trimmed);
   };
 
   return (
-    <div className="hud-panel flex items-stretch gap-4 p-4">
+    <div
+      className={`hud-panel flex items-stretch gap-4 p-4 transition-[height] duration-300 ${
+        expanded ? 'h-[68vh]' : ''
+      }`}
+    >
       {/* Target (만들어야 할 화면) */}
-      <div className="flex w-44 shrink-0 flex-col">
+      <div className={`flex shrink-0 flex-col ${expanded ? 'w-[46%]' : 'w-44'}`}>
         <span className="hud-label mb-1.5">
           만들어야 할 화면 {target ? `(타수 ${target.n})` : ''}
         </span>
-        <div className="relative aspect-[16/10] overflow-hidden rounded-lg bg-black/40 ring-1 ring-white/15">
+        <div
+          className={`relative overflow-hidden rounded-lg bg-black/40 ring-1 ring-white/15 ${
+            expanded ? 'flex-1' : 'aspect-[16/10]'
+          }`}
+        >
           {target ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={target.url} alt="목표 이미지" className="h-full w-full object-cover" />
+            <button
+              type="button"
+              onClick={() => setZoomSrc(target.url)}
+              className="group relative h-full w-full cursor-zoom-in"
+              title="크게 보기"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={target.url}
+                alt="목표 이미지"
+                className={`h-full w-full ${expanded ? 'object-contain' : 'object-cover'}`}
+              />
+              <span className="absolute bottom-1 right-1 rounded bg-black/55 px-1.5 py-0.5 text-[10px] text-white/80 opacity-0 transition group-hover:opacity-100">
+                🔍 크게
+              </span>
+            </button>
           ) : (
             <div className="flex h-full w-full items-center justify-center px-3 text-center text-[11px] text-white/45">
               public/targets 에 image_1.png 부터 넣어주세요
@@ -72,13 +136,15 @@ export function PromptSwingPanel({
         <div className="relative flex-1">
           <textarea
             value={prompt}
-            onChange={(e) => setPrompt(e.target.value.slice(0, MAX_LEN))}
+            onChange={(e) => updatePrompt(e.target.value)}
             onKeyDown={(e) => {
               if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') handleSwing();
             }}
             placeholder="만들고 싶은 웹페이지 화면을 설명해주세요…"
             disabled={swinging}
-            className="thin-scroll h-full w-full resize-none rounded-lg border border-white/10 bg-black/40 p-3 text-sm text-white placeholder:text-white/35 focus:border-action/60 focus:outline-none disabled:opacity-40"
+            className={`thin-scroll h-full w-full resize-none rounded-lg border border-white/10 bg-black/40 p-3 text-white placeholder:text-white/35 focus:border-action/60 focus:outline-none disabled:opacity-40 ${
+              expanded ? 'text-base' : 'text-sm'
+            }`}
           />
 
           {/* 로딩 오버레이 */}
@@ -155,8 +221,8 @@ export function PromptSwingPanel({
         </div>
       </div>
 
-      {/* Swing button */}
-      <div className="flex items-center">
+      {/* Swing button + 크게 보기 토글 */}
+      <div className="flex flex-col justify-center gap-2">
         <motion.button
           whileTap={{ scale: 0.96 }}
           onClick={handleSwing}
@@ -172,7 +238,17 @@ export function PromptSwingPanel({
             <>🏌️ 스윙하기</>
           )}
         </motion.button>
+
+        <button
+          onClick={() => onExpandedChange(!expanded)}
+          className="flex h-9 items-center justify-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-4 text-sm text-white/80 transition hover:bg-white/10 hover:text-white"
+        >
+          {expanded ? '🔽 작게 보기' : '🔍 크게 보기'}
+        </button>
       </div>
+
+      {/* 목표 이미지 확대 팝업 */}
+      <ImageZoomDialog src={zoomSrc} alt="목표 이미지" onClose={() => setZoomSrc(null)} />
     </div>
   );
 }

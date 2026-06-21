@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback, type ChangeEvent } from 'react';
 import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useHydrated } from '@/store/useHydrated';
@@ -17,7 +17,8 @@ import { IconRail } from '@/components/game/IconRail';
 import { CompareOverlay } from '@/components/game/CompareOverlay';
 import { PlayerHUD } from '@/components/game/PlayerHUD';
 import { PromptSwingPanel } from '@/components/game/PromptSwingPanel';
-import { captureHtml } from '@/lib/capture/captureHtml';
+import { ImageZoomDialog } from '@/components/game/ImageZoomDialog';
+import type { OtherBall } from '@/components/game/GolfCourseScene';
 import type { PlayerDTO } from '@/lib/game/gameServer';
 import type { Team, Target } from '@/lib/game/types';
 
@@ -42,6 +43,32 @@ interface CompareData {
   targetN: number;
 }
 
+/** 업로드 이미지를 정사각 size×size로 cover-crop하여 JPEG data URL로 변환. */
+function resizeImageToDataUrl(file: File, size: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('read failed'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('decode failed'));
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return reject(new Error('no ctx'));
+        const scale = Math.max(size / img.width, size / img.height);
+        const w = img.width * scale;
+        const h = img.height * scale;
+        ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function MainPage() {
   const hydrated = useHydrated();
 
@@ -51,6 +78,10 @@ export default function MainPage() {
   // REST API 상태
   const join = useGameApiStore((s) => s.join);
   const setPlayerName = useGameApiStore((s) => s.setPlayerName);
+  const setAvatarUrl = useGameApiStore((s) => s.setAvatarUrl);
+  const updateDraft = useGameApiStore((s) => s.updateDraft);
+  const shotQueue = useGameApiStore((s) => s.shotQueue);
+  const dequeueShot = useGameApiStore((s) => s.dequeueShot);
   const isJoined = useGameApiStore((s) => s.isJoined);
   const isLoading = useGameApiStore((s) => s.isLoading);
   const apiError = useGameApiStore((s) => s.error);
@@ -60,8 +91,14 @@ export default function MainPage() {
   const submitShotApi = useGameApiStore((s) => s.submitShot);
   const resetGameApi = useGameApiStore((s) => s.resetGame);
 
-  const myPlayer = useMyPlayer();
+  const myPlayerLive = useMyPlayer();
   const isHost = useIsHost();
+
+  // 폴링 갱신/재참가로 내 플레이어가 잠깐 사라져도 마지막 정보를 유지해
+  // 플레이 화면이 언마운트되며 깜빡이는 것을 방지한다.
+  const lastMyPlayer = useRef<PlayerDTO | null>(null);
+  if (myPlayerLive) lastMyPlayer.current = myPlayerLive;
+  const myPlayer = myPlayerLive ?? lastMyPlayer.current;
 
   // 폴링 활성화 (참가 후)
   useGamePolling(2000, isJoined);
@@ -85,8 +122,22 @@ export default function MainPage() {
   } | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const [nicknameInitialized, setNicknameInitialized] = useState(false);
+  const [panelExpanded, setPanelExpanded] = useState(false);
+  const [draftAvatar, setDraftAvatar] = useState<string | null>(null);
+  const [spectating, setSpectating] = useState(false);
+  const [spectateTargetId, setSpectateTargetId] = useState<string | null>(null);
+  const [spectateLive, setSpectateLive] = useState<PlayerDTO | null>(null);
+  const [zoomSrc, setZoomSrc] = useState<string | null>(null);
 
   const prevBallPosition = useRef({ x: 0, z: 0, totalDistance: 0 });
+  const autoRejoinedRef = useRef(false);
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 작성 중 프롬프트를 디바운스(300ms)하여 서버에 동기화 (관전자 실시간 표시)
+  const handlePromptChange = (value: string) => {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => updateDraft(value), 300);
+  };
 
   // 현재 게임 단계 결정
   // 게임은 항상 'playing' 상태이므로, 참가하면 바로 플레이로 진입
@@ -107,15 +158,30 @@ export default function MainPage() {
     }
   }, [targetsLoaded, loadTargets]);
 
-  // 닉네임 초기값 설정 (랜덤 닉네임, 참가는 하지 않음)
+  // 닉네임/아바타 초기값 설정 (저장된 값 복원, 참가는 하지 않음)
   useEffect(() => {
     if (!nicknameInitialized) {
       setNicknameInitialized(true);
       const savedName = sessionStorage.getItem('prompt_golf_player_name');
       const playerName = savedName || generateRandomNickname();
       setDraftName(playerName);
+      setDraftAvatar(sessionStorage.getItem('prompt_golf_avatar'));
     }
   }, [nicknameInitialized]);
+
+  // 새로고침 시 사용자 정보 유지: 이전에 참가했었다면 자동 재참가
+  // (서버는 sessionId로 플레이어를 유지하므로 같은 플레이어로 복귀)
+  useEffect(() => {
+    if (autoRejoinedRef.current || !sessionId || isJoined) return;
+    const wasJoined = sessionStorage.getItem('prompt_golf_joined') === '1';
+    const savedName = sessionStorage.getItem('prompt_golf_player_name');
+    if (wasJoined && savedName) {
+      autoRejoinedRef.current = true;
+      setPlayerName(savedName);
+      setAvatarUrl(sessionStorage.getItem('prompt_golf_avatar'));
+      join();
+    }
+  }, [sessionId, isJoined, setPlayerName, setAvatarUrl, join]);
 
   // 로그인 전에도 서버 상태 폴링 (리더보드 표시용)
   const fetchState = useGameApiStore((s) => s.fetchState);
@@ -123,17 +189,43 @@ export default function MainPage() {
     if (sessionId && !isJoined) {
       // 즉시 한 번 가져오기
       fetchState();
-      // 5초마다 폴링 (로그인 전이므로 느리게)
-      const interval = setInterval(fetchState, 5000);
+      // 관전 중에는 1초(프롬프트 실시간 동기화), 평소엔 5초마다 폴링
+      const interval = setInterval(fetchState, spectating ? 1000 : 5000);
       return () => clearInterval(interval);
     }
-  }, [sessionId, isJoined, fetchState]);
+  }, [sessionId, isJoined, fetchState, spectating]);
+
+  // 관전 포커스: 선택한 플레이어의 라이브 상태(작성 중 프롬프트 등)를 전용 API로 폴링
+  useEffect(() => {
+    if (!spectating || !spectateTargetId) {
+      setSpectateLive(null);
+      return;
+    }
+    // 대상이 바뀌면 이전 대상 정보를 즉시 비워 잘못된 정보가 잠깐 보이지 않게
+    setSpectateLive(null);
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/game/player?playerId=${spectateTargetId}`);
+        const data = await res.json();
+        if (!cancelled && data.success) setSpectateLive(data.player as PlayerDTO);
+      } catch {
+        /* 폴링 실패는 무시 */
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [spectating, spectateTargetId]);
 
   // 현재 타겟
   const currentTargetIndex = myPlayer?.currentStroke ?? 0;
   const currentTarget = targets[currentTargetIndex] ?? null;
 
-  // 게임 참가 후 자동 시작
+  // 게임 참가
   const handleJoin = async () => {
     if (!draftName.trim()) {
       setLocalError('이름을 입력해주세요.');
@@ -141,17 +233,40 @@ export default function MainPage() {
     }
     setLocalError(null);
     clearError();
-    // 닉네임을 세션에 저장 (창/탭별 독립)
+    // 사용자 정보를 세션에 저장 (창/탭별 독립, 새로고침 시 유지)
     sessionStorage.setItem('prompt_golf_player_name', draftName);
+    if (draftAvatar) {
+      sessionStorage.setItem('prompt_golf_avatar', draftAvatar);
+    } else {
+      sessionStorage.removeItem('prompt_golf_avatar');
+    }
     setPlayerName(draftName);
+    setAvatarUrl(draftAvatar);
     const joinSuccess = await join();
 
-    // 참가 성공 후 게임이 대기 중이면 자동 시작 시도
+    // 메인 방은 항상 'playing' 상태이므로 별도 시작 호출이 필요 없다.
+    // (이전의 지연 startGame 호출이 첫 참가 시 "플레이어를 찾을 수 없습니다"
+    //  레이스를 유발했었음.) 참가가 끝나면 다음 참가를 위해 플래그만 저장.
     if (joinSuccess) {
-      // 약간의 지연 후 게임 시작 시도 (호스트 권한 확인을 위해)
-      setTimeout(async () => {
-        await startGameApi();
-      }, 500);
+      sessionStorage.setItem('prompt_golf_joined', '1');
+    }
+  };
+
+  // 아바타 이미지 선택 → 128px로 축소한 data URL 생성
+  const handleAvatarChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // 같은 파일 재선택 허용
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setLocalError('이미지 파일만 업로드할 수 있어요.');
+      return;
+    }
+    try {
+      const dataUrl = await resizeImageToDataUrl(file, 128);
+      setDraftAvatar(dataUrl);
+      sessionStorage.setItem('prompt_golf_avatar', dataUrl);
+    } catch {
+      setLocalError('이미지를 불러오지 못했어요.');
     }
   };
 
@@ -166,6 +281,9 @@ export default function MainPage() {
     if (!inputPrompt.trim() || !currentTarget || shotPhase !== 'idle') return;
 
     setPrompt(inputPrompt); // 프롬프트 저장 (applyShot에서 사용)
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    updateDraft(''); // 샷 시작 시 작성 중 프롬프트 즉시 비움
+    setPanelExpanded(false);
     setShotPhase('generating');
     setLastShotResult(null);
     setCompareData(null);
@@ -185,52 +303,41 @@ export default function MainPage() {
       await startGameApi();
     }
 
-    let html: string | null = null;
     let screenshotUrl: string | null = null;
     let similarity = 0.5;
 
     try {
-      // Step 1: HTML 생성
-      setStatusText('웹페이지 생성 중…');
-      const genRes = await fetch('/api/generate-html', {
+      // Step 1: 이미지 생성 (OpenAI)
+      setStatusText('이미지 생성 중…');
+      const genRes = await fetch('/api/generate-image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: inputPrompt }),
       });
       const genData = await genRes.json();
 
-      if (!genData.success || !genData.html) {
-        setLocalError('HTML 생성 실패');
+      if (!genData.success || !genData.dataUrl) {
+        setLocalError('이미지 생성 실패');
         setShotPhase('idle');
         setStatusText('');
         return;
       }
-      html = genData.html;
+      screenshotUrl = genData.dataUrl;
 
-      // Step 2: HTML 캡처 (스크린샷)
-      if (html) {
-        setStatusText('화면 캡처 중…');
-        try {
-          screenshotUrl = await captureHtml(html);
-        } catch {
-          // 캡처 실패해도 계속 진행
-        }
-      }
-
-      // Step 3: 유사도 비교
+      // Step 2: 유사도 비교 (OpenAI 비전)
       setStatusText('유사도 비교 중…');
       const compareRes = await fetch('/api/compare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          targetUrl: currentTarget.url,
-          generatedHtml: html,
+          generatedUrl: screenshotUrl,
+          targetFile: currentTarget.file,
         }),
       });
       const compareResult = await compareRes.json();
       similarity = compareResult.similarity ?? 0.5;
 
-      // Step 4: 비교 오버레이 표시 (스크린샷이 있는 경우)
+      // Step 3: 비교 오버레이 표시
       if (screenshotUrl) {
         setCompareData({
           targetUrl: currentTarget.url,
@@ -242,7 +349,6 @@ export default function MainPage() {
         setShotPhase('comparing');
         setStatusText('');
       } else {
-        // 스크린샷 없으면 바로 샷 적용
         await applyShot(similarity, inputPrompt);
       }
     } catch {
@@ -310,10 +416,28 @@ export default function MainPage() {
     (a, b) => a.score - b.score || a.currentStroke - b.currentStroke
   );
 
-  // 3D 씬용 progress 계산
-  const FLAG_Z = 380;
-  const progress = myPlayer ? myPlayer.ballPosition.z / FLAG_Z : 0;
+  // 3D 씬용 progress — 비행 시작/끝, 상대, 샷 모두 totalDistance/hole.distance 기준으로 통일
+  const progress = myPlayer && hole.distance > 0 ? myPlayer.totalDistance / hole.distance : 0;
   const lateralX = myPlayer?.ballPosition.x ?? 0;
+
+  // 게임 화면에 함께 표시할 상대 플레이어들 (나 제외)
+  const others: OtherBall[] = (gameState?.players ?? [])
+    .filter((p) => p.id !== myPlayer?.id)
+    .map((p) => ({
+      id: p.id,
+      name: p.name,
+      imageUrl: p.avatarUrl,
+      progress: hole.distance > 0 ? p.totalDistance / hole.distance : 0,
+      lateralX: p.ballPosition.x,
+    }));
+
+  // 내 샷 이벤트는 로컬 비행으로 처리하므로 큐에서 즉시 제거(상대 샷만 씬에서 재생)
+  useEffect(() => {
+    if (!myPlayer?.id) return;
+    shotQueue.forEach((s) => {
+      if (s.playerId === myPlayer.id) dequeueShot(s.id);
+    });
+  }, [shotQueue, myPlayer?.id, dequeueShot]);
 
   // 팀 데이터 (3D 씬용)
   const teams = (gameState?.players ?? []).map((p) => ({
@@ -325,7 +449,17 @@ export default function MainPage() {
     ballPosition: p.ballPosition,
     totalDistance: p.totalDistance,
     isCurrentTurn: p.id === myPlayer?.id,
+    currentPrompt: p.currentPrompt,
   }));
+
+  // 관전 중 포커스한 플레이어
+  const spectatePlayer = spectateTargetId
+    ? gameState?.players.find((p) => p.id === spectateTargetId) ?? null
+    : null;
+  // 의도 기반: 플레이어가 일시적으로 폴링 상태에서 사라져도(재참가 등) 관전 유지
+  const spectateActive = spectating && spectateTargetId != null;
+  // 표시용 라이브 정보: 전용 폴링(spectateLive) 우선, 없으면 메인 상태 폴백
+  const focusInfo = spectateLive ?? spectatePlayer;
 
   // 내 팀 데이터 (PlayerHUD용)
   const myTeam: Team | undefined = myPlayer
@@ -346,17 +480,18 @@ export default function MainPage() {
   const remaining = Math.max(0, Math.round(hole.distance - (myPlayer?.totalDistance ?? 0)));
 
 
-  // 비행 완료 핸들러
-  const handleFlightComplete = () => {
+  // 비행 완료 핸들러 (memo된 GolfCourseScene이 비행 중 재렌더되지 않도록 안정화)
+  const handleFlightComplete = useCallback(() => {
     // flying 상태일 때만 feedback으로 전환
-    if (shotPhase === 'flying') {
-      setShotPhase('feedback');
+    setShotPhase((phase) => {
+      if (phase !== 'flying') return phase;
       setTimeout(() => {
         setShotPhase('idle');
         setLastShotResult(null);
       }, 3000);
-    }
-  };
+      return 'feedback';
+    });
+  }, []);
 
   // 이전 위치 기반 progress 계산
   const prevProgress = hole.distance > 0 ? prevBallPosition.current.totalDistance / hole.distance : 0;
@@ -366,7 +501,14 @@ export default function MainPage() {
       {/* 3D 배경 - 대기/로그인 시 대시보드, 플레이 시 골프코스 */}
       <div className="absolute inset-0">
         {hydrated && (phase === 'login' || phase === 'waiting') && (
-          <DashboardScene teams={teams} hole={hole} />
+          <DashboardScene
+            teams={teams}
+            hole={hole}
+            onSelectPlayer={spectating ? setSpectateTargetId : undefined}
+            shots={shotQueue}
+            onShotDone={dequeueShot}
+            focusPlayerId={spectateActive ? spectateTargetId : null}
+          />
         )}
         {hydrated && (phase === 'playing' || phase === 'finished') && (
           <GolfCourseScene
@@ -377,6 +519,11 @@ export default function MainPage() {
             prevProgress={prevProgress}
             prevLateralX={prevBallPosition.current.x}
             onFlightComplete={handleFlightComplete}
+            others={others}
+            shots={shotQueue}
+            myPlayerId={myPlayer?.id}
+            onShotDone={dequeueShot}
+            holeDistance={hole.distance}
           />
         )}
       </div>
@@ -393,13 +540,15 @@ export default function MainPage() {
         <h1 className="text-sm font-semibold tracking-widest text-white/70">PROMPT GOLF</h1>
       </div>
 
-      {/* 서버 상태 (우측 상단) */}
-      <div className="absolute right-4 top-4 flex items-center gap-2 text-sm">
-        <span className={`h-2 w-2 rounded-full ${gameState ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`} />
-        <span className="text-white/60">
-          {gameState ? `${onlineCount}명 플레이 중` : '서버 연결 중...'}
-        </span>
-      </div>
+      {/* 서버 상태 (우측 상단) — 관전 포커스 중에는 뒤로가기 버튼과 겹치므로 숨김 */}
+      {!spectateActive && (
+        <div className="absolute right-4 top-4 flex items-center gap-2 text-sm">
+          <span className={`h-2 w-2 rounded-full ${gameState ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`} />
+          <span className="text-white/60">
+            {gameState ? `${onlineCount}명 플레이 중` : '서버 연결 중...'}
+          </span>
+        </div>
+      )}
 
 
       {/* ─────────────────────────────────────────────────────────────────────── */}
@@ -452,15 +601,50 @@ export default function MainPage() {
       {/* 로그인 단계 - 중앙 하단 */}
       {/* ─────────────────────────────────────────────────────────────────────── */}
       <AnimatePresence>
-        {phase === 'login' && (
+        {phase === 'login' && !spectating && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="absolute bottom-8 left-1/2 w-full max-w-sm -translate-x-1/2 px-4"
+            className="absolute inset-0 z-20 flex items-center justify-center px-4"
           >
-            <div className="rounded-2xl bg-black/50 p-5 backdrop-blur-md">
-              <h2 className="mb-4 text-center text-lg font-bold text-white">게임 참가</h2>
+            <div className="w-full max-w-sm rounded-2xl bg-black/50 p-6 backdrop-blur-md">
+              <h2 className="mb-5 text-center text-lg font-bold text-white">게임 참가</h2>
+
+              {/* 아바타 업로드 */}
+              <div className="mb-4 flex flex-col items-center gap-2">
+                <label className="group relative h-24 w-24 cursor-pointer overflow-hidden rounded-full ring-2 ring-white/20 transition hover:ring-green-500">
+                  {draftAvatar ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={draftAvatar} alt="내 아바타" className="h-full w-full object-cover" />
+                  ) : (
+                    <div className="flex h-full w-full flex-col items-center justify-center bg-white/10 text-white/50">
+                      <span className="text-2xl">📷</span>
+                      <span className="mt-1 text-[10px]">사진 추가</span>
+                    </div>
+                  )}
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-xs text-white opacity-0 transition group-hover:opacity-100">
+                    변경
+                  </div>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleAvatarChange}
+                    className="hidden"
+                  />
+                </label>
+                {draftAvatar && (
+                  <button
+                    onClick={() => {
+                      setDraftAvatar(null);
+                      sessionStorage.removeItem('prompt_golf_avatar');
+                    }}
+                    className="text-xs text-white/50 underline-offset-2 hover:text-white/80 hover:underline"
+                  >
+                    사진 제거
+                  </button>
+                )}
+              </div>
 
               <input
                 type="text"
@@ -480,10 +664,155 @@ export default function MainPage() {
               >
                 {isLoading ? '참가 중...' : '▶ 게임 참가'}
               </button>
+
+              <button
+                onClick={() => setSpectating(true)}
+                className="mt-2 w-full rounded-xl border border-white/15 bg-white/5 py-3 font-medium text-white/80 transition hover:bg-white/10 hover:text-white"
+              >
+                👁 관전하기
+              </button>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* ─────────────────────────────────────────────────────────────────────── */}
+      {/* 관전 모드 - 전체 보기 바 (플레이어 미선택) */}
+      {/* ─────────────────────────────────────────────────────────────────────── */}
+      <AnimatePresence>
+        {phase === 'login' && spectating && !spectateActive && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="absolute bottom-8 left-1/2 z-20 -translate-x-1/2"
+          >
+            <div className="flex items-center gap-3 rounded-2xl bg-black/50 px-5 py-3 backdrop-blur-md">
+              <span className="flex items-center gap-2 text-sm font-medium text-white/80">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
+                👁 관전 중
+              </span>
+              <button
+                onClick={() => {
+                  setSpectating(false);
+                  setSpectateTargetId(null);
+                }}
+                className="rounded-xl bg-green-600 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-green-600/30 transition hover:bg-green-700"
+              >
+                ▶ 게임 참가
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ─────────────────────────────────────────────────────────────────────── */}
+      {/* 관전 모드 - 플레이어 포커스 (선택된 플레이어 화면) */}
+      {/* ─────────────────────────────────────────────────────────────────────── */}
+      {phase === 'login' && spectateActive && focusInfo && (
+        <>
+          {/* 우상단: 뒤로가기 버튼 (전체 보기로) */}
+          <button
+            onClick={() => setSpectateTargetId(null)}
+            className="absolute right-5 top-5 z-40 flex items-center gap-1.5 rounded-xl bg-black/55 px-4 py-2 text-sm font-medium text-white/90 backdrop-blur-md transition hover:bg-black/75"
+          >
+            ← 뒤로가기
+          </button>
+
+          {/* 좌상단: 관전 대상 플레이어 정보 */}
+          <div className="absolute left-5 top-5 z-20 w-64">
+            <div className="rounded-2xl bg-black/50 p-4 backdrop-blur-md">
+              <div className="flex items-center gap-3">
+                {focusInfo.avatarUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={focusInfo.avatarUrl}
+                    alt=""
+                    className="h-12 w-12 rounded-full object-cover ring-2 ring-white/30"
+                  />
+                ) : (
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/10 text-xl">
+                    🧑
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 truncate font-bold text-white">
+                    👁 {focusInfo.name}
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${focusInfo.online ? 'bg-green-500' : 'bg-gray-500'}`} />
+                  </div>
+                  <div className="text-xs text-white/60">
+                    {focusInfo.currentStroke}타 · 스코어 {focusInfo.score > 0 ? `+${focusInfo.score}` : focusInfo.score}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 하단: 관전 대상이 만들 화면 + 작성 중 프롬프트(전용 API 실시간 폴링) */}
+          <div className="absolute bottom-5 left-1/2 z-20 w-full max-w-3xl -translate-x-1/2 px-5">
+            <div className="flex items-stretch gap-4 rounded-2xl bg-black/50 p-4 backdrop-blur-md">
+              {/* 만들어야 할 화면 */}
+              <div className="flex w-40 shrink-0 flex-col">
+                <span className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-white/50">
+                  만들어야 할 화면
+                </span>
+                <div className="relative aspect-[16/10] overflow-hidden rounded-lg bg-black/40 ring-1 ring-white/15">
+                  {targets[focusInfo.currentStroke] ? (
+                    <button
+                      type="button"
+                      onClick={() => setZoomSrc(targets[focusInfo.currentStroke].url)}
+                      className="group relative h-full w-full cursor-zoom-in"
+                      title="크게 보기"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={targets[focusInfo.currentStroke].url}
+                        alt="목표"
+                        className="h-full w-full object-cover"
+                      />
+                      <span className="absolute bottom-1 right-1 rounded bg-black/55 px-1.5 py-0.5 text-[10px] text-white/80 opacity-0 transition group-hover:opacity-100">
+                        🔍 크게
+                      </span>
+                    </button>
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-[11px] text-white/40">
+                      준비된 타겟 없음
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 작성 중 프롬프트 (실시간) */}
+              <div className="flex min-w-0 flex-1 flex-col">
+                <span className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-white/50">
+                  ✍️ 작성 중인 프롬프트
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-yellow-400" />
+                </span>
+                <div className="thin-scroll flex-1 overflow-auto rounded-lg border border-white/10 bg-black/40 p-3 text-sm text-white/90">
+                  {focusInfo.currentPrompt?.trim() ? (
+                    focusInfo.currentPrompt
+                  ) : (
+                    <span className="text-white/35">아직 입력 중인 내용이 없습니다…</span>
+                  )}
+                </div>
+              </div>
+
+              {/* 참가 버튼 */}
+              <div className="flex items-center">
+                <button
+                  onClick={() => {
+                    setSpectating(false);
+                    setSpectateTargetId(null);
+                  }}
+                  className="h-12 rounded-xl bg-green-600 px-5 text-sm font-semibold text-white shadow-lg shadow-green-600/30 transition hover:bg-green-700"
+                >
+                  ▶ 게임 참가
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* ─────────────────────────────────────────────────────────────────────── */}
       {/* 대기 단계 - 중앙 */}
@@ -612,11 +941,18 @@ export default function MainPage() {
 
           {/* 프롬프트 입력 패널 (하단) */}
           {!myPlayer?.finished && (
-            <div className="absolute bottom-5 left-1/2 w-full max-w-4xl -translate-x-1/2 px-5">
+            <div
+              className={`absolute bottom-5 left-1/2 w-full -translate-x-1/2 px-5 transition-[max-width] duration-300 ${
+                panelExpanded ? 'max-w-[1500px]' : 'max-w-4xl'
+              }`}
+            >
               <PromptSwingPanel
                 target={currentTarget}
                 swinging={shotPhase === 'generating'}
                 statusText={statusText}
+                expanded={panelExpanded}
+                onExpandedChange={setPanelExpanded}
+                onPromptChange={handlePromptChange}
                 onSwing={handleSwing}
               />
             </div>
@@ -687,6 +1023,9 @@ export default function MainPage() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* 목표 이미지 확대 팝업 (관전 화면) */}
+      <ImageZoomDialog src={zoomSrc} alt="목표 이미지" onClose={() => setZoomSrc(null)} />
     </main>
   );
 }

@@ -16,11 +16,12 @@ const MIME: Record<string, string> = {
   '.svg': 'image/svg+xml',
 };
 
-/** Parse a data: URL into a Gemini-style inlineData payload. */
-function parseDataUrl(dataUrl: string): ImagePayload | null {
-  const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-  if (!m) return null;
-  return { mimeType: m[1], data: m[2] };
+/** Parse the generated image (data: URL or remote https URL) into a payload. */
+function parseGenerated(src: string): ImagePayload | null {
+  const m = src.match(/^data:([^;]+);base64,(.+)$/);
+  if (m) return { mimeType: m[1], data: m[2] };
+  if (/^https?:\/\//i.test(src)) return { mimeType: 'image/png', data: src, isUrl: true };
+  return null;
 }
 
 async function loadTarget(file: string): Promise<ImagePayload | null> {
@@ -34,26 +35,28 @@ async function loadTarget(file: string): Promise<ImagePayload | null> {
 }
 
 /**
- * POST /api/compare  { screenshot: dataURL, targetFile }
- * Compares the captured page screenshot against the target image (Gemini
+ * POST /api/compare  { generatedUrl: dataURL|https, targetFile }
+ * Compares the player's generated image against the target image (OpenAI
  * vision) and returns a 0..1 similarity score.
+ * (`screenshot` is accepted as a legacy alias for `generatedUrl`.)
  */
 export async function POST(req: NextRequest) {
-  let body: { screenshot?: string; targetFile?: string };
+  let body: { generatedUrl?: string; screenshot?: string; targetFile?: string };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  const generated = body.screenshot ? parseDataUrl(body.screenshot) : null;
+  const src = body.generatedUrl ?? body.screenshot ?? '';
+  const generated = src ? parseGenerated(src) : null;
   if (!generated) {
-    return NextResponse.json({ error: 'screenshot(dataURL) is required' }, { status: 400 });
+    return NextResponse.json({ error: 'generatedUrl(dataURL/https) is required' }, { status: 400 });
   }
 
-  // Guard against path traversal: only allow image_{n}.{ext} basenames.
+  // Guard against path traversal: safe basename only (no slashes), image ext.
   const file = body.targetFile ?? '';
-  if (!/^image_\d+\.(png|jpe?g|webp|gif|svg)$/i.test(file)) {
+  if (file !== path.basename(file) || !/^[\w.-]+\.(png|jpe?g|webp|gif|svg)$/i.test(file)) {
     return NextResponse.json({ error: 'invalid targetFile' }, { status: 400 });
   }
 

@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 
 interface CompareOverlayProps {
@@ -17,6 +18,17 @@ export function CompareOverlay({
   onComplete,
 }: CompareOverlayProps) {
   const percent = Math.round(similarity * 100);
+
+  // 오버레이 마운트 시 5초 뒤 onComplete를 정확히 한 번만 호출.
+  // (framer-motion의 onAnimationComplete는 등장/퇴장 애니마다 발화하여
+  //  콜백이 두 번 예약되고, 결과적으로 샷이 두 번 제출되는 버그가 있었음.)
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
+
+  useEffect(() => {
+    const timer = setTimeout(() => onCompleteRef.current(), 5000);
+    return () => clearTimeout(timer);
+  }, []);
 
   // 유사도에 따른 색상
   const getColor = () => {
@@ -40,10 +52,6 @@ export function CompareOverlay({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      onAnimationComplete={() => {
-        // 5초 후 onComplete 호출
-        setTimeout(onComplete, 5000);
-      }}
       className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm"
     >
       <motion.div

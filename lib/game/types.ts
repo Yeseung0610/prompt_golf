@@ -31,6 +31,8 @@ export interface Team {
   isCurrentTurn: boolean;
   /** Marks the hole as completed. */
   finished?: boolean;
+  /** 현재 작성 중인 프롬프트 (관전자 실시간 표시용). */
+  currentPrompt?: string;
 }
 
 export interface Hole {

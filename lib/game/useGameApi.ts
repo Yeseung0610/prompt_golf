@@ -9,7 +9,7 @@
 
 import { create } from 'zustand';
 import { useEffect, useRef, useCallback } from 'react';
-import type { GameStateDTO, PlayerDTO } from './gameServer';
+import type { GameStateDTO, PlayerDTO, ShotEvent } from './gameServer';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Session ID 관리
@@ -69,14 +69,22 @@ interface GameApiState {
   sessionId: string;
   playerId: string | null;
   playerName: string;
+  avatarUrl: string | null;
   gameState: GameStateDTO | null;
   isJoined: boolean;
   isLoading: boolean;
   error: string | null;
+  /** 마지막으로 받은(=애니메이션 큐에 넣은) 샷 ID. 폴링 쿼리에 사용. */
+  lastShotId: number | null;
+  /** 아직 재생하지 않은 신규 샷 큐. */
+  shotQueue: ShotEvent[];
 
   // Actions
   setSessionId: (id: string) => void;
+  /** 비행 애니메이션을 끝낸 샷을 큐에서 제거. */
+  dequeueShot: (id: number) => void;
   setPlayerName: (name: string) => void;
+  setAvatarUrl: (url: string | null) => void;
   join: () => Promise<boolean>;
   fetchState: () => Promise<void>;
   startGame: () => Promise<boolean>;
@@ -87,6 +95,7 @@ interface GameApiState {
     finished?: boolean;
   }>;
   resetGame: () => Promise<boolean>;
+  updateDraft: (prompt: string) => Promise<void>;
   clearError: () => void;
 }
 
@@ -94,17 +103,25 @@ export const useGameApiStore = create<GameApiState>((set, get) => ({
   sessionId: '',
   playerId: null,
   playerName: '',
+  avatarUrl: null,
   gameState: null,
   isJoined: false,
   isLoading: false,
   error: null,
+  lastShotId: null,
+  shotQueue: [],
+
+  dequeueShot: (id) =>
+    set((s) => ({ shotQueue: s.shotQueue.filter((shot) => shot.id !== id) })),
 
   setSessionId: (id) => set({ sessionId: id }),
 
   setPlayerName: (name) => set({ playerName: name }),
 
+  setAvatarUrl: (url) => set({ avatarUrl: url }),
+
   join: async () => {
-    const { sessionId, playerName } = get();
+    const { sessionId, playerName, avatarUrl } = get();
 
     if (!sessionId || !playerName.trim()) {
       set({ error: '세션 ID와 이름이 필요합니다.' });
@@ -117,7 +134,7 @@ export const useGameApiStore = create<GameApiState>((set, get) => ({
       const res = await fetch('/api/game/join', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, name: playerName, avatarUrl: null }),
+        body: JSON.stringify({ sessionId, name: playerName, avatarUrl }),
       });
 
       const data = await res.json();
@@ -138,26 +155,42 @@ export const useGameApiStore = create<GameApiState>((set, get) => ({
   },
 
   fetchState: async () => {
-    const { sessionId, isJoined, playerName, playerId } = get();
+    const { sessionId, isJoined, playerName, playerId, lastShotId } = get();
     if (!sessionId) return;
 
     try {
-      const res = await fetch(`/api/game/state?sessionId=${sessionId}`);
+      // 마지막 샷 ID 이후의 신규 샷만 받아온다 (없으면 첫 동기화 → 백로그 제외)
+      const sinceQuery = lastShotId == null ? '' : `&sinceShotId=${lastShotId}`;
+      const res = await fetch(`/api/game/state?sessionId=${sessionId}${sinceQuery}`);
       const data = await res.json();
 
       if (data.success && data.state) {
         const state = data.state as GameStateDTO;
 
-        // 참가 상태인데 내 플레이어가 서버에 없으면 자동 재참가
+        // 참가 상태인데 내 플레이어가 서버에 없으면 조용히 재참가.
+        // isJoined를 false로 내리면 화면이 로그인으로 튕기며(언마운트) 입력 중인
+        // 프롬프트가 날아가므로, isJoined는 유지한 채 같은 sessionId로 재등록만 한다.
         if (isJoined && playerId && playerName) {
           const myPlayerExists = state.players.some((p) => p.id === playerId);
           if (!myPlayerExists) {
-            console.log('[GameApi] My player disappeared, auto-rejoining...');
-            // isJoined를 false로 설정하고 재참가
-            set({ isJoined: false, playerId: null });
+            console.log('[GameApi] My player disappeared, silently re-joining...');
             await get().join();
             return;
           }
+        }
+
+        // 신규 샷 처리: 첫 동기화면 포인터만 맞추고(백로그 재생 안 함),
+        // 이후엔 신규 샷을 큐에 누적하고 포인터를 최신으로 전진시킨다.
+        const latestShotId = state.latestShotId ?? 0;
+        const newShots = state.shots ?? [];
+        if (lastShotId == null) {
+          set({ lastShotId: latestShotId });
+        } else if (newShots.length > 0) {
+          set((s) => ({
+            // 큐가 무한정 커지지 않도록 최근 12개로 제한
+            shotQueue: [...s.shotQueue, ...newShots].slice(-12),
+            lastShotId: latestShotId,
+          }));
         }
 
         set({ gameState: state, error: null });
@@ -268,6 +301,20 @@ export const useGameApiStore = create<GameApiState>((set, get) => ({
     } catch (err) {
       set({ error: '서버 연결 실패' });
       return false;
+    }
+  },
+
+  updateDraft: async (prompt) => {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    try {
+      await fetch('/api/game/draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, prompt }),
+      });
+    } catch {
+      // 드래프트 동기화 실패는 조용히 무시 (다음 입력에서 재시도)
     }
   },
 

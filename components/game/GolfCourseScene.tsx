@@ -1,15 +1,30 @@
 'use client';
 
-import { Suspense, useState, useCallback, useRef, useEffect } from 'react';
+import { Suspense, useState, useCallback, useRef, useEffect, memo } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Sky, Cloud, Clouds } from '@react-three/drei';
 import * as THREE from 'three';
-import { LightweightBall, StaticBall } from './LightweightBall';
+import { StaticBall } from './LightweightBall';
+import { ArcBall } from './ArcBall';
+import { BallMarker } from './BallMarker';
 import { CameraController } from './CameraController';
 import { LandingEffect } from './LandingEffect';
 import { SharedCourse, COURSE_LENGTH } from './SharedCourse';
 import { HOLE_1_LAYOUT, getLandingZone } from '@/lib/game/courseLayout';
 import type { LandingZone } from '@/lib/game/types';
+import type { ShotEvent } from '@/lib/game/gameServer';
+
+// 게임 화면 공 표시 크기 — 홈(DashboardScene)의 BallMarker radius와 동일하게 맞춤.
+const BALL_DISPLAY_RADIUS = 1.2;
+
+/** 게임 화면에 함께 표시할 상대 플레이어. */
+export interface OtherBall {
+  id: string;
+  name: string;
+  imageUrl: string | null;
+  progress: number;
+  lateralX: number;
+}
 
 interface GolfCourseSceneProps {
   /** 0 = on the tee, 1 = at the flag. */
@@ -27,6 +42,16 @@ interface GolfCourseSceneProps {
   onFlightComplete?: (finalPosition?: THREE.Vector3) => void;
   /** 해저드 진입 콜백 */
   onHazardEnter?: (hazardId: string) => void;
+  /** 함께 표시할 상대 플레이어들. */
+  others?: OtherBall[];
+  /** 상대 샷 비행 이벤트 큐 (자기 샷은 제외하고 재생). */
+  shots?: ShotEvent[];
+  /** 내 플레이어 ID (자기 샷 식별용). */
+  myPlayerId?: string;
+  /** 비행 애니메이션 완료 시 호출 (큐에서 제거). */
+  onShotDone?: (id: number) => void;
+  /** 홀 전체 거리 (샷 dist → progress 변환용). */
+  holeDistance?: number;
 }
 
 /**
@@ -73,6 +98,11 @@ function SceneContent({
   prevLateralX,
   onFlightComplete,
   onHazardEnter,
+  others = [],
+  shots = [],
+  myPlayerId,
+  onShotDone,
+  holeDistance = 380,
 }: GolfCourseSceneProps) {
   // 착지 이펙트 상태
   const [landingEffect, setLandingEffect] = useState<{
@@ -113,23 +143,17 @@ function SceneContent({
     setCameraFollowPosition([pos.x, pos.y, pos.z]);
   }, []);
 
-  // 물리 시뮬레이션 완료 처리
-  const handlePhysicsRest = useCallback((finalPos: THREE.Vector3) => {
-    // 착지 이펙트 표시
-    const zone = getLandingZone(finalPos.x, finalPos.z, HOLE_1_LAYOUT);
-    setLandingEffect({
-      active: true,
-      position: [finalPos.x, finalPos.y, finalPos.z],
-      zone,
-    });
-
-    // 멈춘 위치 저장
-    setRestPosition([finalPos.x, finalPos.y, finalPos.z]);
-    setCameraFollowPosition([finalPos.x, finalPos.y, finalPos.z]);
-
-    // 상위 컴포넌트에 완료 알림
-    onFlightComplete?.(finalPos);
-  }, [onFlightComplete]);
+  // 비행(ArcBall) 완료 처리 — 도착지 = targetBallPosition
+  const handleOwnFlightDone = useCallback(() => {
+    const [fx, fy, fz] = targetBallPosition;
+    const zone = getLandingZone(fx, fz, HOLE_1_LAYOUT);
+    setLandingEffect({ active: true, position: [fx, fy, fz], zone });
+    setRestPosition([fx, fy, fz]);
+    setCameraFollowPosition([fx, fy, fz]);
+    onFlightComplete?.(new THREE.Vector3(fx, fy, fz));
+    // targetBallPosition은 매 렌더 새 배열이지만 비행 중 값은 고정 → 안전
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onFlightComplete, targetBallPosition[0], targetBallPosition[1], targetBallPosition[2]]);
 
   const handleLandingEffectComplete = useCallback(() => {
     setLandingEffect((prev) => ({ ...prev, active: false }));
@@ -183,24 +207,52 @@ function SceneContent({
         flying={flying}
       />
 
-      {/* 공 렌더링 - 경량 물리 시뮬레이터 사용 */}
+      {/* 내 공 — 게임/관전 공통 ArcBall(거리비례 높이)로 비행 */}
       {flying ? (
-        // 샷을 쳤을 때: 경량 물리 공 (발사 → 착지 → 굴러감 → 멈춤)
-        <LightweightBall
-          key={`lightweight-ball-${physicsKey.current}`}
-          startPosition={startBallPosition}
-          targetPosition={targetBallPosition}
-          launch={true}
-          onRest={handlePhysicsRest}
-          onPositionUpdate={handlePositionUpdate}
+        <ArcBall
+          key={`arc-ball-${physicsKey.current}`}
+          start={startBallPosition}
+          end={targetBallPosition}
+          radius={BALL_DISPLAY_RADIUS}
+          onProgress={handlePositionUpdate}
+          onDone={handleOwnFlightDone}
         />
       ) : (
-        // 대기 중: 고정된 공 (마지막 멈춘 위치 또는 gameStore 위치)
         <StaticBall
           key={`static-ball-${shotTick ?? 0}`}
           position={restPosition ?? targetBallPosition}
+          radius={BALL_DISPLAY_RADIUS}
         />
       )}
+
+      {/* 상대 플레이어들 — 게임 화면에도 표시. 비행 중인 상대는 정지 공 숨김 */}
+      {others.map((o) => {
+        const isFlying = shots.some((s) => s.playerId === o.id);
+        if (isFlying) return null;
+        return (
+          <BallMarker
+            key={o.id}
+            position={calculateBallPosition(o.progress, o.lateralX)}
+            radius={BALL_DISPLAY_RADIUS}
+            label={o.name}
+            imageUrl={o.imageUrl}
+            snap
+          />
+        );
+      })}
+
+      {/* 상대 샷 비행 (내 샷은 위에서 처리) */}
+      {shots
+        .filter((s) => s.playerId !== myPlayerId)
+        .map((s) => (
+          <ArcBall
+            key={s.id}
+            start={calculateBallPosition(s.fromDist / holeDistance, s.fromX)}
+            end={calculateBallPosition(s.toDist / holeDistance, s.toX)}
+            radius={BALL_DISPLAY_RADIUS}
+            onDone={() => onShotDone?.(s.id)}
+          />
+        ))}
 
       {/* 착지 이펙트 */}
       <LandingEffect
@@ -216,7 +268,7 @@ function SceneContent({
   );
 }
 
-export function GolfCourseScene({
+function GolfCourseSceneComponent({
   progress,
   lateralX,
   shotTick,
@@ -225,6 +277,11 @@ export function GolfCourseScene({
   prevLateralX = 0,
   onFlightComplete,
   onHazardEnter,
+  others,
+  shots,
+  myPlayerId,
+  onShotDone,
+  holeDistance,
 }: GolfCourseSceneProps) {
   return (
     <Canvas
@@ -243,8 +300,19 @@ export function GolfCourseScene({
           prevLateralX={prevLateralX}
           onFlightComplete={onFlightComplete}
           onHazardEnter={onHazardEnter}
+          others={others}
+          shots={shots}
+          myPlayerId={myPlayerId}
+          onShotDone={onShotDone}
+          holeDistance={holeDistance}
         />
       </Suspense>
     </Canvas>
   );
 }
+
+/**
+ * 폴링 등으로 부모가 자주 재렌더되어도 props(스칼라 + 안정화된 콜백)가 동일하면
+ * 무거운 3D 씬을 재렌더하지 않도록 memo로 감싼다 → 비행 애니메이션 끊김/깜빡임 방지.
+ */
+export const GolfCourseScene = memo(GolfCourseSceneComponent);

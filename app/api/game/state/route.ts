@@ -10,6 +10,8 @@ export async function GET(request: NextRequest) {
   try {
     const sessionId = request.nextUrl.searchParams.get('sessionId');
     const adminMode = request.nextUrl.searchParams.get('adminMode') === 'true';
+    const sinceRaw = request.nextUrl.searchParams.get('sinceShotId');
+    const sinceShotId = sinceRaw == null ? null : Number(sinceRaw);
 
     if (!sessionId) {
       return NextResponse.json(
@@ -18,7 +20,11 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const state = getGameState(sessionId, adminMode);
+    const state = getGameState(
+      sessionId,
+      adminMode,
+      sinceShotId != null && Number.isFinite(sinceShotId) ? sinceShotId : null
+    );
 
     if (!state) {
       return NextResponse.json(
