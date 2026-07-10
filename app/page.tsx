@@ -15,12 +15,15 @@ import {
 } from '@/lib/game/useGameApi';
 import { IconRail } from '@/components/game/IconRail';
 import { CompareOverlay } from '@/components/game/CompareOverlay';
+import { EvaluationOverlay } from '@/components/game/EvaluationOverlay';
 import { PlayerHUD } from '@/components/game/PlayerHUD';
 import { PromptSwingPanel } from '@/components/game/PromptSwingPanel';
 import { ImageZoomDialog } from '@/components/game/ImageZoomDialog';
 import type { OtherBall } from '@/components/game/GolfCourseScene';
 import type { PlayerDTO } from '@/lib/game/gameServer';
 import type { Team, Target } from '@/lib/game/types';
+import { challengeForStroke } from '@/lib/content/challenges';
+import { TRACK_META, type ChallengeHole, type EvaluationResult } from '@/lib/content/types';
 
 const DashboardScene = dynamic(
   () => import('@/components/game/DashboardScene').then((m) => m.DashboardScene),
@@ -41,6 +44,13 @@ interface CompareData {
   similarity: number;
   prompt: string;
   targetN: number;
+}
+
+/** 루브릭 트랙 평가 결과 (EvaluationOverlay 표시 + 샷 적용용). */
+interface EvalData {
+  challenge: ChallengeHole;
+  result: EvaluationResult;
+  submission: string;
 }
 
 /** 업로드 이미지를 정사각 size×size로 cover-crop하여 JPEG data URL로 변환. */
@@ -114,11 +124,14 @@ export default function MainPage() {
   const [prompt, setPrompt] = useState('');
   const [shotPhase, setShotPhase] = useState<ShotPhase>('idle');
   const [compareData, setCompareData] = useState<CompareData | null>(null);
+  const [evalData, setEvalData] = useState<EvalData | null>(null);
   const [statusText, setStatusText] = useState('');
   const [lastShotResult, setLastShotResult] = useState<{
     similarity: number;
     distance: number;
     finished: boolean;
+    /** true면 루브릭 평가 점수(유사도가 아님). */
+    rubric?: boolean;
   } | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const [nicknameInitialized, setNicknameInitialized] = useState(false);
@@ -221,9 +234,15 @@ export default function MainPage() {
     };
   }, [spectating, spectateTargetId]);
 
-  // 현재 타겟
+  // 현재 타수의 챌린지 (데모 시퀀스: 이미지 재현 → 백엔드 API 설계 → SRE 장애 대응)
   const currentTargetIndex = myPlayer?.currentStroke ?? 0;
-  const currentTarget = targets[currentTargetIndex] ?? null;
+  const currentChallenge = challengeForStroke(currentTargetIndex, targets.length);
+  const isRubricChallenge = currentChallenge != null && currentChallenge.track !== 'image';
+  // 이미지 트랙 챌린지가 참조하는 목표 이미지 (루브릭 트랙이면 없음)
+  const currentTarget: Target | null =
+    currentChallenge?.track === 'image' && currentChallenge.targetIndex != null
+      ? targets[currentChallenge.targetIndex] ?? null
+      : null;
 
   // 게임 참가
   const handleJoin = async () => {
@@ -278,7 +297,9 @@ export default function MainPage() {
 
   // 샷 제출 (PromptSwingPanel에서 호출)
   const handleSwing = async (inputPrompt: string) => {
-    if (!inputPrompt.trim() || !currentTarget || shotPhase !== 'idle') return;
+    if (!inputPrompt.trim() || shotPhase !== 'idle') return;
+    // 이미지 트랙은 목표 이미지가 필요, 루브릭 트랙은 브리프만으로 진행
+    if (!isRubricChallenge && !currentTarget) return;
 
     setPrompt(inputPrompt); // 프롬프트 저장 (applyShot에서 사용)
     if (draftTimer.current) clearTimeout(draftTimer.current);
@@ -287,6 +308,7 @@ export default function MainPage() {
     setShotPhase('generating');
     setLastShotResult(null);
     setCompareData(null);
+    setEvalData(null);
     setLocalError(null);
 
     // 이전 공 위치 저장 (애니메이션용)
@@ -302,6 +324,42 @@ export default function MainPage() {
     if (gameState?.status === 'waiting') {
       await startGameApi();
     }
+
+    // ── 루브릭 트랙: 텍스트 산출물 → LLM Judge 평가 ──────────────────────────
+    if (isRubricChallenge && currentChallenge) {
+      try {
+        setStatusText('제출물 평가 중…');
+        const res = await fetch('/api/evaluate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ challengeId: currentChallenge.id, submission: inputPrompt }),
+        });
+        const data = await res.json();
+
+        if (!data.success || !data.result) {
+          setLocalError(data.error ?? '평가 실패');
+          setShotPhase('idle');
+          setStatusText('');
+          return;
+        }
+
+        setEvalData({
+          challenge: currentChallenge,
+          result: data.result as EvaluationResult,
+          submission: inputPrompt,
+        });
+        setShotPhase('comparing');
+        setStatusText('');
+      } catch {
+        setLocalError('샷 처리 중 오류 발생');
+        setShotPhase('idle');
+        setStatusText('');
+      }
+      return;
+    }
+
+    // ── 이미지 트랙: 기존 생성 → 비교 플로우 ────────────────────────────────
+    if (!currentTarget) return;
 
     let screenshotUrl: string | null = null;
     let similarity = 0.5;
@@ -365,8 +423,19 @@ export default function MainPage() {
     await applyShot(compareData.similarity, compareData.prompt);
   };
 
+  // 루브릭 평가 오버레이 완료 후 샷 적용 (score가 기존 similarity 자리에 들어간다)
+  const handleEvaluationComplete = async () => {
+    if (!evalData) return;
+    setShotPhase('flying');
+    await applyShot(evalData.result.score, evalData.submission, { rubric: true });
+  };
+
   // 샷 결과 적용
-  const applyShot = async (similarity: number, shotPrompt: string) => {
+  const applyShot = async (
+    similarity: number,
+    shotPrompt: string,
+    opts?: { rubric?: boolean },
+  ) => {
     try {
       const shotResult = await submitShotApi({
         prompt: shotPrompt,
@@ -379,6 +448,7 @@ export default function MainPage() {
           similarity,
           distance: Math.round(similarity * 100),
           finished: shotResult.finished ?? false,
+          rubric: opts?.rubric ?? false,
         });
         setPrompt('');
 
@@ -460,6 +530,15 @@ export default function MainPage() {
   const spectateActive = spectating && spectateTargetId != null;
   // 표시용 라이브 정보: 전용 폴링(spectateLive) 우선, 없으면 메인 상태 폴백
   const focusInfo = spectateLive ?? spectatePlayer;
+
+  // 관전 대상이 현재 플레이 중인 챌린지 (루브릭 홀이면 이미지 대신 브리프 요약 표시)
+  const spectateChallenge = focusInfo
+    ? challengeForStroke(focusInfo.currentStroke, targets.length)
+    : null;
+  const spectateTarget =
+    spectateChallenge?.track === 'image' && spectateChallenge.targetIndex != null
+      ? targets[spectateChallenge.targetIndex] ?? null
+      : null;
 
   // 내 팀 데이터 (PlayerHUD용)
   const myTeam: Team | undefined = myPlayer
@@ -751,22 +830,36 @@ export default function MainPage() {
           {/* 하단: 관전 대상이 만들 화면 + 작성 중 프롬프트(전용 API 실시간 폴링) */}
           <div className="absolute bottom-5 left-1/2 z-20 w-full max-w-3xl -translate-x-1/2 px-5">
             <div className="flex items-stretch gap-4 rounded-2xl bg-black/50 p-4 backdrop-blur-md">
-              {/* 만들어야 할 화면 */}
+              {/* 만들어야 할 화면 / 진행 중 챌린지 */}
               <div className="flex w-40 shrink-0 flex-col">
                 <span className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-white/50">
-                  만들어야 할 화면
+                  {spectateChallenge && spectateChallenge.track !== 'image'
+                    ? '진행 중 챌린지'
+                    : '만들어야 할 화면'}
                 </span>
                 <div className="relative aspect-[16/10] overflow-hidden rounded-lg bg-black/40 ring-1 ring-white/15">
-                  {targets[focusInfo.currentStroke] ? (
+                  {spectateChallenge && spectateChallenge.track !== 'image' ? (
+                    <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 px-2 text-center">
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${TRACK_META[spectateChallenge.track].badgeClass}`}
+                      >
+                        {TRACK_META[spectateChallenge.track].icon}{' '}
+                        {TRACK_META[spectateChallenge.track].label}
+                      </span>
+                      <span className="text-[11px] font-medium leading-snug text-white/85">
+                        {spectateChallenge.title}
+                      </span>
+                    </div>
+                  ) : spectateTarget ? (
                     <button
                       type="button"
-                      onClick={() => setZoomSrc(targets[focusInfo.currentStroke].url)}
+                      onClick={() => setZoomSrc(spectateTarget.url)}
                       className="group relative h-full w-full cursor-zoom-in"
                       title="크게 보기"
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
-                        src={targets[focusInfo.currentStroke].url}
+                        src={spectateTarget.url}
                         alt="목표"
                         className="h-full w-full object-cover"
                       />
@@ -895,7 +988,8 @@ export default function MainPage() {
                     </div>
                   )}
                   <div className="mt-1 text-xs text-white/60">
-                    유사도 {Math.round(lastShotResult.similarity * 100)}%
+                    {lastShotResult.rubric ? '평가 점수' : '유사도'}{' '}
+                    {Math.round(lastShotResult.similarity * 100)}%
                   </div>
                 </div>
               </motion.div>
@@ -948,6 +1042,7 @@ export default function MainPage() {
             >
               <PromptSwingPanel
                 target={currentTarget}
+                challenge={currentChallenge}
                 swinging={shotPhase === 'generating'}
                 statusText={statusText}
                 expanded={panelExpanded}
@@ -970,6 +1065,19 @@ export default function MainPage() {
             generatedUrl={compareData.generatedUrl}
             similarity={compareData.similarity}
             onComplete={handleCompareComplete}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* ─────────────────────────────────────────────────────────────────────── */}
+      {/* 루브릭 평가 결과 오버레이 */}
+      {/* ─────────────────────────────────────────────────────────────────────── */}
+      <AnimatePresence>
+        {shotPhase === 'comparing' && evalData && (
+          <EvaluationOverlay
+            challenge={evalData.challenge}
+            result={evalData.result}
+            onComplete={handleEvaluationComplete}
           />
         )}
       </AnimatePresence>

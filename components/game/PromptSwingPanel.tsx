@@ -3,9 +3,13 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Target } from '@/lib/game/types';
+import type { ChallengeHole } from '@/lib/content/types';
 import { ImageZoomDialog } from './ImageZoomDialog';
+import { ChallengeBriefCard } from './ChallengeBriefCard';
 
 const MAX_LEN = 2000;
+// 루브릭 트랙은 설계/보고서 등 긴 텍스트 산출물을 받으므로 더 넉넉하게
+const MAX_LEN_RUBRIC = 8000;
 // 작성 중 프롬프트 임시 저장 키 (리마운트/새로고침에도 입력이 날아가지 않도록)
 const DRAFT_KEY = 'prompt_golf_draft';
 
@@ -15,6 +19,9 @@ const LOADING_STEPS = [
   { key: 'comparing', label: '유사도 비교 중', icon: '🔍' },
 ];
 
+// 루브릭 트랙 로딩 단계 (LLM Judge 평가 1단계)
+const LOADING_STEPS_RUBRIC = [{ key: 'evaluating', label: '제출물 평가 중', icon: '⚖️' }];
+
 function getStepIndex(statusText?: string): number {
   if (!statusText) return 0;
   if (statusText.includes('비교')) return 1;
@@ -23,6 +30,8 @@ function getStepIndex(statusText?: string): number {
 
 interface PromptSwingPanelProps {
   target: Target | null;
+  /** 현재 타수의 챌린지. 루브릭 트랙이면 이미지 대신 브리프 카드를 보여준다. */
+  challenge?: ChallengeHole | null;
   swinging: boolean;
   /** Short status line shown while swinging (생성 중 / 캡처 중 / 비교 중). */
   statusText?: string;
@@ -34,9 +43,10 @@ interface PromptSwingPanelProps {
   onSwing: (prompt: string) => void;
 }
 
-/** Unified bottom panel: target image · prompt textarea · swing button. */
+/** Unified bottom panel: target image(또는 챌린지 브리프) · prompt textarea · swing button. */
 export function PromptSwingPanel({
   target,
+  challenge,
   swinging,
   statusText,
   expanded,
@@ -46,6 +56,12 @@ export function PromptSwingPanel({
 }: PromptSwingPanelProps) {
   const [prompt, setPrompt] = useState('');
   const [zoomSrc, setZoomSrc] = useState<string | null>(null);
+
+  // 루브릭 트랙 여부 — 목표 이미지 대신 브리프를 보여주고 텍스트 산출물을 받는다.
+  const isRubric = challenge != null && challenge.track !== 'image';
+  const maxLen = isRubric ? MAX_LEN_RUBRIC : MAX_LEN;
+  const loadingSteps = isRubric ? LOADING_STEPS_RUBRIC : LOADING_STEPS;
+  const canSwing = isRubric || target != null;
 
   // 마운트 시 저장된 draft 복원 (재참가/리마운트/새로고침에도 입력 보존)
   useEffect(() => {
@@ -63,7 +79,7 @@ export function PromptSwingPanel({
   }, []);
 
   const updatePrompt = (value: string) => {
-    const v = value.slice(0, MAX_LEN);
+    const v = value.slice(0, maxLen);
     setPrompt(v);
     try {
       sessionStorage.setItem(DRAFT_KEY, v);
@@ -75,7 +91,7 @@ export function PromptSwingPanel({
 
   const handleSwing = () => {
     const trimmed = prompt.trim();
-    if (!trimmed || swinging || !target) return;
+    if (!trimmed || swinging || !canSwing) return;
     // 스윙 시작 시 draft 비움 (다음 샷은 새로 입력)
     try {
       sessionStorage.removeItem(DRAFT_KEY);
@@ -92,11 +108,18 @@ export function PromptSwingPanel({
         expanded ? 'h-[68vh]' : ''
       }`}
     >
-      {/* Target (만들어야 할 화면) */}
-      <div className={`flex shrink-0 flex-col ${expanded ? 'w-[46%]' : 'w-44'}`}>
+      {/* Target — 이미지 트랙은 목표 화면, 루브릭 트랙은 챌린지 브리프 */}
+      <div className={`flex shrink-0 flex-col ${expanded ? 'w-[46%]' : isRubric ? 'w-72' : 'w-44'}`}>
         <span className="hud-label mb-1.5">
-          만들어야 할 화면 {target ? `(타수 ${target.n})` : ''}
+          {isRubric
+            ? '챌린지 브리프'
+            : `만들어야 할 화면 ${target ? `(타수 ${target.n})` : ''}`}
         </span>
+        {isRubric ? (
+          <div className={expanded ? 'min-h-0 flex-1' : 'h-52'}>
+            <ChallengeBriefCard challenge={challenge} expanded={expanded} />
+          </div>
+        ) : (
         <div
           className={`relative overflow-hidden rounded-lg bg-black/40 ring-1 ring-white/15 ${
             expanded ? 'flex-1' : 'aspect-[16/10]'
@@ -125,12 +148,13 @@ export function PromptSwingPanel({
             </div>
           )}
         </div>
+        )}
       </div>
 
 
       {/* Prompt input */}
       <div className="relative flex min-w-0 flex-1 flex-col">
-        <span className="hud-label mb-1.5">프롬프트 입력</span>
+        <span className="hud-label mb-1.5">{isRubric ? '산출물 작성' : '프롬프트 입력'}</span>
 
         {/* 텍스트 입력 영역 */}
         <div className="relative flex-1">
@@ -140,7 +164,11 @@ export function PromptSwingPanel({
             onKeyDown={(e) => {
               if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') handleSwing();
             }}
-            placeholder="만들고 싶은 웹페이지 화면을 설명해주세요…"
+            placeholder={
+              isRubric
+                ? '브리프의 요구사항을 만족하는 산출물을 작성하세요… (설계, 대응 절차 등)'
+                : '만들고 싶은 웹페이지 화면을 설명해주세요…'
+            }
             disabled={swinging}
             className={`thin-scroll h-full w-full resize-none rounded-lg border border-white/10 bg-black/40 p-3 text-white placeholder:text-white/35 focus:border-action/60 focus:outline-none disabled:opacity-40 ${
               expanded ? 'text-base' : 'text-sm'
@@ -171,8 +199,8 @@ export function PromptSwingPanel({
 
                 {/* 단계 표시기 */}
                 <div className="flex items-center gap-2">
-                  {LOADING_STEPS.map((step, i) => {
-                    const currentStep = getStepIndex(statusText);
+                  {loadingSteps.map((step, i) => {
+                    const currentStep = isRubric ? 0 : getStepIndex(statusText);
                     const isActive = i === currentStep;
                     const isCompleted = i < currentStep;
 
@@ -189,7 +217,7 @@ export function PromptSwingPanel({
                         >
                           {isCompleted ? '✓' : step.icon}
                         </div>
-                        {i < LOADING_STEPS.length - 1 && (
+                        {i < loadingSteps.length - 1 && (
                           <div
                             className={`mx-1 h-0.5 w-6 ${
                               isCompleted ? 'bg-green-500/80' : 'bg-white/10'
@@ -216,7 +244,7 @@ export function PromptSwingPanel({
             {!swinging && 'Cmd/Ctrl + Enter로 빠른 스윙'}
           </span>
           <span className="text-white/40">
-            {prompt.length} / {MAX_LEN}
+            {prompt.length} / {maxLen}
           </span>
         </div>
       </div>
@@ -226,16 +254,16 @@ export function PromptSwingPanel({
         <motion.button
           whileTap={{ scale: 0.96 }}
           onClick={handleSwing}
-          disabled={swinging || !prompt.trim() || !target}
+          disabled={swinging || !prompt.trim() || !canSwing}
           className="action-btn h-12 px-6 text-base"
         >
           {swinging ? (
             <>
               <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-              스윙 중…
+              {isRubric ? '평가 중…' : '스윙 중…'}
             </>
           ) : (
-            <>🏌️ 스윙하기</>
+            <>{isRubric ? '📤 제출하기' : '🏌️ 스윙하기'}</>
           )}
         </motion.button>
 
