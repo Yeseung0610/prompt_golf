@@ -1,5 +1,7 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 
 interface ImageZoomDialogProps {
@@ -11,7 +13,14 @@ interface ImageZoomDialogProps {
 
 /** 이미지를 화면 중앙에 크게 띄우는 팝업 다이얼로그 (X 버튼 / 바깥 클릭으로 닫기). */
 export function ImageZoomDialog({ src, alt = '', onClose }: ImageZoomDialogProps) {
-  return (
+  // portal은 클라이언트에서만 (SSR에는 document가 없음)
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  if (!mounted) return null;
+
+  // body에 portal로 렌더 — backdrop-filter/transform이 있는 조상(hud-panel 등) 안에서
+  // position:fixed의 기준이 그 조상으로 바뀌어 팝업이 패널에 갇히는 문제를 방지한다.
+  return createPortal(
     <AnimatePresence>
       {src && (
         <motion.div
@@ -43,6 +52,7 @@ export function ImageZoomDialog({ src, alt = '', onClose }: ImageZoomDialogProps
           />
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }
